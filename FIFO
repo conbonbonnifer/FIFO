@@ -1,0 +1,2223 @@
+//this function's purpose is to format the output of function FIFO. Will execute on open, refresh or run
+function onOpen(e) { 
+
+  var sheetName = 'FIFO3' ; 
+  var startRow =  1 ; 
+    
+  // 0 or 1 
+  var redGreenShading = 1 ;
+  var redGreenShadingPercents = 1 ;
+  
+  var factor = 1 ;
+  
+  var minFontSize = 11 ; //not ready to change from 11
+  
+  PimpMySpreadsheet( sheetName , startRow , redGreenShading , redGreenShadingPercents , factor,  minFontSize ) ; 
+ 
+}
+
+/**
+* Finds the FMV using date and symbol 
+ *
+ * @param {"00/00/0000"} date 
+ * @param {"BTC"} symbol 
+ * @return Fair Market Value
+ * @customfunction
+ */
+
+function FMV(date, type) { //need to upgrade this with more interactions with apis eventually, right now it's a redundant step
+  
+  var FMV;
+  
+  FMV = KoinbaseFMV( type , "USD" , "spot" , date ) ;
+  
+  return FMV || 1;
+}
+
+
+/**
+* Creates a first-in first-out list of sells of stock or currency. 
+ * Can handle buys/sells as income, gifts, or transfers. 
+ *
+ * @param {A2:J10} range The range of orders. Each order should have 10 columns: account, date, ID, amount, type, trade amount, trade type, description, fee, fee type
+ * @param {0} batched Default 0 for batched sell info. Input 1 for detailed.
+ * @param {0} sorted Sort by short/long term. Default 0 for sorted. Input 1 for combined list.
+ * @param {1} gifts Display gifts. Defult 0. Input 1 to show.
+ * @param {1} fees Display fees. Defult 0. Input 1 to show. If batched = 1 then will also display fee/transfer record.
+ * @param {1} dividends Display dividends. Defult 0. Input 1 to show.
+ * @param {1} roi Display ROI. Defult 0. Input 1 to show.
+ * @param {1} annualROI Display annual G/L percents. Defult 0. Input 1 to show.
+ * @param {0} shortTermAnnualROI Display short-term annual ROI. Defult 0. Input 1 to show.
+ * @param {1} shortHead Display shortened header labels. Defult 0. Input 1 to show.
+ * @param {"00/00/0000"} datei "date" The initial date with which to display sells. You should check end-point exlusivity (Because internet time is weird)
+ * @param {"00/00/0000"} datef "date" The final date...
+ * @param {...accountName} account Accounts(s) to filter. Add more seperated with a comma.
+ * @return returns a range with sell information.
+ * @customfunction
+ */
+
+function Fifo(range, batched, sorted, gifts, fees, dividends , roi , annualROI, shortTermAnnualROI, shortHead, datei, datef, account) {  //Setting up the range to be workable in Google Apps Script
+  //Logger.log('hi')
+  var sheetName = 'AllTrades' ;
+  var FIFOSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  
+  var range = range || FIFOSheet.getRange(253, 2, 44, 10).getValues();
+  
+  var batched = batched || 0 ;
+  var sorted = sorted || 0 ;
+  var gLp = roi || 0 ;
+  var divp = dividends || 0 ;
+  var feesp = fees || 0 ;
+  var giftp = gifts || 0 ;
+  var annualROI = annualROI || 0 ;
+  var stAnnualROI = shortTermAnnualROI || 0 ;
+  
+  var datei = datei || "01/01/1970" ;
+  var datef = datef || "06/09/4200" ;
+  datei = new Date(datei) ;
+  datef = new Date(datef) ;
+  
+  var account = account || "All"
+  
+  range = RemoveFirstBlankRow( range )   //removes all rows after first empty row
+  
+  range = range.sort( rangeSorter2 ) ; //sorts by date first and then by qty second 
+  
+  var height =  range.length ; 
+  //Logger.log('height' , height)
+  var accounts = Cols(range, 0) ;
+  var dates = MakeDates( Cols(range, 1) , height ) ;
+  var IDs = Cols(range, 2) ;
+  var amounts = Cols(range, 3) ;
+  var types = Cols(range, 4) ;
+  var tradeAmounts = Cols(range, 5) ;
+  var tradeTypes = Cols(range, 6) ;
+  var descriptions = Cols(range, 7) ;
+  var feeTypes = Cols(range, 9 ) ;
+  var fees = ConvertFees( Cols(range, 8) , height , feeTypes ,dates) ;
+  var unitFMVs = UnitFMVs( descriptions , dates , types , tradeTypes, height , amounts ) ;
+  var tradeUnitFMVs = TradeUnitFMVs( descriptions , dates , types , tradeTypes, height ) ;
+  var filterAccounts = FilterAccounts( account, accounts , arguments ) ; //only shows accounts in parameters
+  var piles = [];  
+  var sells = [];
+  //Logger.log(height)
+  for (var i = 0 ; i < height ; i++) {  
+    //Logger.log(i)
+    if ( ( amounts[i] > 0 && tradeAmounts[i] > 0 ) || ( amounts[i] < 0 && tradeAmounts[i] < 0 ) ) {  //this will catch if there are some errors with the input data range and return which type of error.
+      return "Error: Mis-matched signs at row " + ( i + 1 ) ;
+    }
+    else if ( amounts[i] > 0 && 0 != descriptions[i].indexOf("Transfer") ) {  //if the amount is positive and it's not a transfer, then create a pile. Find the unit cost basis of this pile. (we will deal with transfers when negative)
+      var pile = new Pile( accounts[ i ] , dates[ i ] , IDs[ i ] , amounts[ i ] , types[ i ] , tradeAmounts[ i ] , tradeTypes[ i ] , descriptions[ i ] , unitFMVs[ i ] , tradeUnitFMVs[ i ] , fees[ i ] ) ;   
+      pile = Pile2( pile ) ; // calculates additional pile properties
+      piles.push( pile ) ;   
+    }
+    else if ( amounts[ i ] <= 0 ) { // if the amount is less than or equal to zero, then it is a dividend or a sell. We will filter the piles array for matching account and type. 
+      var sortedPiles = [ ] ;
+      piles = piles.filter( filterZeros ) ; //getting rid of any zero amounts ( because they were already sold off )
+      sortedPiles = piles.filter( filterAccountAndType( accounts[ i ] , types[ i ] ) )  //finding piles with matching accounts and types
+      sortedPiles = sortedPiles.sort( sorter ) //then sorting these accounts by date aquired
+      
+      if ( amounts[ i ] === 0 ) {
+        Dividends( sortedPiles , tradeAmounts[ i ] ) ;
+      }
+      else if (amounts[i] < 0) { 
+        Logger.log('sells before' , sells) ;
+        DealWithIt( range[i] , sortedPiles , unitFMVs[i] , tradeUnitFMVs[ i ] , fees[i] , piles , stAnnualROI , filterAccounts , datei , datef , giftp , descriptions[i] , batched , sells) ;  
+        Logger.log('sells after' , sells) ;
+      } ;    
+    } ; //end if amount[i] <=0
+  } ; //end for loop. we now have an array of objects called "sells" that contains all the sell/dispose info retrieved from "range"
+  
+  var numGifts = 0 ; //checks to display how many gifts are given away
+  for ( var i = 0 ; i < descriptions.length ; i++ ) {
+    if ( descriptions[ i ].indexOf( "Gift" ) === 0 && amounts[ i ] < 0 ) {
+      numGifts++ 
+    } ; } ;
+  
+  var Head = Header( giftp , numGifts , shortHead) ; // creates an object with all the heading labels. The labels will change depending on if gifts are displayed, and if there ARE any gifts TO display.
+  var headerRow = HeaderRow( Head ) ;
+  
+  var sellsarray ;  // turn the sells objects to arrays based on sorted parameter
+  if ( sorted === 1 ) {    
+    sellsarray = UnsortedSells( sells ) ;
+    sellsarray.unshift( [] ) ;
+  } 
+  else if ( sorted === 0 ) {
+    sellsarray = SortingHat( sells ) ;
+  } ;
+  sellsarray.unshift( headerRow ) ;
+  sellsarray.push( [] , GrandTotals( sells ) ) 
+  sellsarray = Format( sellsarray, Head , batched , sorted , divp , feesp , gLp , annualROI) ;
+  return sellsarray ;  
+} // end function FIFO
+
+
+
+function RemoveFirstBlankRow( range ) {
+  for ( var i = 0 ; i < range.length ; i++ ) { 
+    if (range[ i ][ 3 ].toString() == "") {
+      var blank = i
+      break ;
+    }
+  }
+  range.splice(blank, range.length-blank )
+  return range ;
+}
+
+function Cols(range, number) {
+  
+  var height = range.length ;
+  var arry = [] ;
+  for (var i = 0; i < height; i++) {
+    arry.push( range[ i ][ number ] ) ;
+  }
+  return arry
+}
+
+/**
+ * Get the coinbase price.
+ *
+ * @param {string} currency_pair The currency pair (BTC-EUR, ETH-EUR or LTC-EUR)
+ * @param {string} price_type The price type (buy, sell or spot
+ * @return The current price on coinbase
+ * @customfunction
+ */
+
+function KoinbaseFMV( type , tradeType, priceType , date ) {
+  
+  var type = type || "BTC" ;
+  var priceType = priceType || "spot" ;
+  var tradeType = tradeType || "USD" ;
+  
+  var currencyPair = type + "-" + tradeType
+  
+  var date = date || "2017-11-29T19:38:47.030Z" ;
+  
+  var date = new Date( date ) ;
+  
+  date = date.toJSON().slice( 0 , 10 )
+  
+  //Logger.log(date)
+  
+  var url = "https://api.coinbase.com/v2/prices/" + currencyPair + "/" + priceType + "?date=" + date
+  
+  var response = UrlFetchApp.fetch(url)
+  var data = JSON.parse(response)
+  var price = data.data.amount
+  
+  return Number(price) ;
+}
+
+function FilterAccounts( account, accounts , arguments0 ) {
+  var filterAccounts = [] ; 
+  //this will create an array of all the unique accounts in range, or create and array of only the accounts choosen in parameters
+  if ( account === "All" ) {
+    filterAccounts = accounts.filter(onlyUnique) ;
+    return filterAccounts ;
+  }
+  else {
+    for (var i = 10 ; i < arguments0.length ; i ++ ) {
+      filterAccounts.push(arguments0[i]) ;
+    }
+    return filterAccounts ;
+  }
+}
+
+function MakeDates( Col , height ) {
+  var dates = [] ;
+  for (var i = 0; i < height; i++){
+    var x = new Date(Col[i]);
+    dates.push(x);
+  }
+  return dates
+}
+
+function ConvertFees( Col , height , feeTypes, dates ) {
+  var fees = [] ;
+  var x;
+  for (var i = 0; i < height; i++) {   
+    if ( feeTypes[ i ] != "USD" && Col[ i ] != 0 ) { 
+      x = FMV( dates[ i ] , feeTypes[ i ] ) * Col[ i ] ;
+    }
+    else { 
+      x = Col[ i ] ; 
+    } ;
+    if ( x > 0 ) {
+     x *= -1 ; 
+    } ;
+    x = Math.round( x  * 100000000 ) / 100000000 ;
+    fees.push( x ) ; 
+  }
+  return fees
+}
+
+function UnitFMVs(  descriptions , dates , types , tradeTypes , height ,amounts) {
+  var unitFMVs = [] ;
+  var x ;
+  for ( var i = 0 ; i < height ; i ++ ) { 
+    //creating FMVs for the main amount unit when recieving or disposing. Cannot handle recieving stocks as a gift or using as expense
+    if ( descriptions[ i ].indexOf( "Expense" ) === 0 || 
+        descriptions[ i ].indexOf( "Income" ) === 0 || 
+      ( types[ i ] !== 'USD' && tradeTypes[ i ] !== 'USD' ) ||
+        ( descriptions[ i ] === "Gift" && types[ i ] !== 'USD'  && amounts[i] < 0 ) ) { //this is garbage logic
+          x = FMV( dates[ i ] , types[ i ] ) || 0; 
+        }
+    //if it's a gift without a known cost basis, then i would need to know the fmv to track gainz/loss, but not to know proceeds and such
+    else {
+      x = "Unnecessary, maybe" ;
+    } ;
+    unitFMVs.push( x );
+  }
+  return unitFMVs ;
+}
+
+function TradeUnitFMVs( descriptions , dates , types , tradeTypes, height ) {
+  var tradeUnitFMVs = [] ;
+  for ( var i = 0 ; i < height ; i ++ ) { 
+    if ( descriptions[ i ] != "Transfer" && tradeTypes[ i ] != "USD" ) { 
+      x = FMV( dates[ i ] , tradeTypes[ i ] ) ;
+    }
+    else {
+      x = 1 ;
+    } ;
+    tradeUnitFMVs.push(x);
+    
+  } ;
+  return tradeUnitFMVs
+}
+
+function Pile( account, 
+              dateAquired, 
+              ID, 
+              amount, 
+              type, 
+              tradeAmount, 
+              tradeType, 
+              description, 
+              unitFMV, 
+              tradeUnitFMV , 
+              curFee ,
+              feesRecord , 
+              accountRecord , 
+              IDrecord , 
+              dateRecord , 
+              unitCostBasis ) {
+  
+  this.account = account //|| null ;
+  this.dateAquired = new Date(dateAquired) || null ;
+  this.ID = ID || null ;
+  this.amount = amount || null ;
+  this.type = type || null ;
+  this.tradeAmount = tradeAmount || null ;
+  this.tradeType = tradeType || null ;
+  this.description = description || null ;
+  
+  this.unitFMV = unitFMV //|| null ;
+  this.tradeUnitFMV = tradeUnitFMV //|| null ;
+
+  
+  this.curFee = curFee || 0 ;
+  this.feesRecord = feesRecord || [] ;
+  this.accountRecord = accountRecord || [] ;
+  this.IDrecord = IDrecord || [] ;
+  this.dateRecord = dateRecord || [] ;
+  this.unitCostBasis = unitCostBasis || null ;
+  
+  this.dividends = 0 ;
+  
+  this.giftDate = new Date(dateAquired) || null ;
+  
+}
+
+function Pile2( Pile0 ) {
+  
+  
+  var unitCostBasis = 0;
+  
+  //positive cases: 
+  //1. Income
+  //2. Gift
+  //3. Buy
+  //4. Transfer
+  
+  //Logger.log( 'Pile0 curFee:' , Pile0.curFee) 
+  
+  if ( 0 === Pile0.description.indexOf( "Income" ) ) { //1. Income, the unit cost basis will be in terms of the date's Free Market Value (FMV) plus any fee.
+    unitCostBasis = Pile0.unitFMV + ( -Pile0.curFee / Pile0.amount ) ;
+  }
+  
+  if ( 0 === Pile0.description.indexOf( "Gift" ) ) { //2. Gift the cost basis will be 0 plus any fee.
+      unitCostBasis = ( - Pile0.curFee / Pile0.amount ) ;
+  }
+  
+  //description "Gift, 00/00/0000, giftCostBasis" //the giftCostBasis should be in USD or whatever = 1. there's probably a way to find the local currency and automate the stablecurrency.
+  if ( Pile0.description.slice(0, 5) === "Gift,") {  //if it's a gift with known cost basis, the cost basis will be inherited. 
+    
+    var giftDate = Pile0.description.slice( 6, 16 ) ;
+    giftDate =  new Date( giftDate ) ;
+    
+    var giftCostBasis = Pile0.description.slice( 18 , Pile0.description.length ) ;
+
+    unitCostBasis += giftCostBasis / Pile0.amount ; 
+    
+    Pile0.giftDate = Pile0.dateAquired ; //Pile0 will add a property to pile called giftDate which will be the date of gift recieved
+    Pile0.dateAquired = giftDate ; //Pile0 will make it so the dateAquired will be the inherited Tax Basis date
+  }
+  
+  //3. Buy, The cost basis will be the trade amount times the trade amount FMV (USD = 1)
+  //we gotta shut off the curFee if this is being bought with tradeType != USD
+  else if (Pile0.description.slice(0, 3) === "Buy") { 
+    var costBasisTot = 0
+    
+//    if ( Pile0.tradeType != 'USD' ) {
+//     Pile0.curFee = 0 ; 
+//    }
+    
+    
+    
+    if ( Pile0.tradeType !== 'USD') {
+      costBasisTot = ( - Pile0.tradeAmount * Pile0.tradeUnitFMV )  ; 
+      Pile0.curFee = 0 ;
+    }
+    else {
+      costBasisTot = ( - Pile0.tradeAmount * Pile0.tradeUnitFMV ) + -  Pile0.curFee ;
+    }
+     
+    unitCostBasis = costBasisTot / Pile0.amount ;
+  }
+  
+  //Logger.log(' Pile2' , unitCostBasis , Pile0.curFee )
+  
+  Pile0.feesRecord.push( Pile0.curFee ) ; 
+  Pile0.unitCostBasis = unitCostBasis ;
+  
+  return Pile0 ;
+}
+
+function DealWithIt( range , sortedPiles , unitFMV , tradeUnitFMV , fee , piles , stAnnualROI , filterAccounts , datei , datef , giftp , description , batched , sells ) {      
+  var cum; 
+  var thisSellBatch = Dispose( range , sortedPiles , unitFMV , tradeUnitFMV , fee , piles , stAnnualROI ) ; // Dispose() updates the piles and creates sell objects
+  if ( thisSellBatch.length > 0 ) { 
+    thisSellBatch = Eliminator( thisSellBatch , filterAccounts , datei , datef , giftp , description ) ; //returns zero if thisSellBatch is filtered out
+  }
+  if ( thisSellBatch != 0 && batched === 1 ) { //if batched = 1 then push thisSellBatch into sells
+    for ( var j = 0 ; j < thisSellBatch.length ; j++ ) {
+      sells.push( thisSellBatch[ j ] ) ; // this is pushing an object 
+    } ; 
+  }    
+  else if ( thisSellBatch != 0) {        
+    cum = Cum( thisSellBatch , stAnnualROI) ; //Cum returns an object   
+    if ( cum.cumAll ) { //if cumAll exists then its homo so push just one object, if not then mixed and push short and long objects
+      sells.push( cum.cumAll ) ; 
+    }
+    else {
+      sells.push( cum.cumShort , cum.cumLong ) ; 
+    } ; 
+  } ; 
+}
+
+function Dividends( sortedPiles , tradeAmount ) {
+  
+  var totShares= 0 ;
+  
+  //first find what you currently have. This is going to be the sum of amounts in sortedPiles
+  for ( var j = 0 ; j < sortedPiles.length ; j++ ) {
+    totShares += sortedPiles[ j ].amount || 0
+  }
+  
+  //then divide the total dividend by how many shares you have.
+  var dollarsPerShare = tradeAmount / totShares ;
+  for ( var j = 0 ; j < sortedPiles.length ; j++ ) {
+    sortedPiles[ j ].dividends += dollarsPerShare * sortedPiles[ j ].amount 
+  } 
+  
+}
+
+function Dispose( row , sortedPiles , unitFMV , tradeUnitFMV , fee , piles , stAnnualROI ) {
+  
+  var term ;
+  var thisBatch = [ ] ;
+  
+  var account     = row[ 0 ] ;
+  var date        = new Date ( row[ 1 ] ) ;
+  var ID          = row[ 2 ] ;
+  var amount      = row[ 3 ] ;
+  var type        = row[ 4 ] ;
+  var tradeAmount = row[ 5 ] ;
+  var tradeType   = row[ 6 ] ;
+  var description = row[ 7 ] ;
+  
+
+  var fee = fee ;
+  
+  var amounti = Math.abs(amount) ;
+  
+  var divs = 0;
+  
+  while (amounti > 0) { //start while loop and extract all info from the first pile in sorted Piles
+    
+
+    var firstIn      = sortedPiles[0] ;
+    var account0     = firstIn.account ;
+    var ID0          = firstIn.ID ;
+    var date0        = new Date(firstIn.dateAquired) ;
+    var giftDate0    = new Date( firstIn.giftDate ) ;
+    var amount0      = firstIn.amount ;
+    var type0        = firstIn.type ;
+    var tradeAmount0 = firstIn.tradeAmount ;
+    var tradeType0   = firstIn.tradeType ;
+    var description0 = firstIn.description ;
+    
+    var unitFMV0      = firstIn.unitFMV ;
+    var tradeUnitFMV0 = firstIn.tradeUnitFMV ;
+    
+    var feesRecord0    = [ firstIn.feesRecord ] ;
+    var accountRecord0 = [ firstIn.accountRecord ] ;
+    var IDrecord0      = [ firstIn.IDrecord ] ;
+    var dateRecord0    = [ firstIn.dateRecord ] ;
+    
+    var unitCostBasis0 = firstIn.unitCostBasis ;
+    var dividends0     = firstIn.dividends || 0 ;
+    
+    var proceeds  ;  //express variables for individual sell piles
+    var costBasis ;
+    var gainLoss  ;
+    
+    var annGLPer    ;  
+    var annDivPer   ;
+    var annGLPerDiv ;
+    
+    var unitFee;
+   
+    //Logger.log('previous','amounti', amounti, 'fee',fee)
+    //_____________________________________________________________________________________________________________________________________________________________________________
+    
+    if (amounti < amount0) { //if the amount is smaller than the first pile, create this sell ratio to calculate proceeds and cost basis
+
+      var sorted0SellRatio = amounti / amount0 ;
+      var newtradeAmount = sorted0SellRatio * tradeAmount0 ;
+      
+      var sellRatio = amounti / - amount ; 
+      var sellObj ;
+      var sell ;
+      
+      //If something is sold for USD or OTHER and the fee is in USD or OTHER , then apply the fee to the cost basis of the sell
+      //note: the fee needs to not be included when exchanging OTHER for OTHER ( ie if type != USD and tradeType != USD )
+      
+      unitFee = fee / amount   ;
+      
+      //Logger.log('amounti < amount0  ', 'unitFee',unitFee,'fee',fee,'amounti' ,amounti)
+      //if negative, the order could be:
+      //1. Sell
+      //2. Expense
+      //3. Gift given
+      //4. Transfer
+      
+      if ( description.indexOf( "Expense" ) === 0  || description.indexOf( "Gift" ) === 0  ||  description.indexOf( "Sell" ) === 0 ) { 
+        
+        if ( description.indexOf( "Sell" ) === 0 ) {  // 1. A sale for tanglibe value (USD, BTC, etc.), then the proceeds will be exact conversion (USD = 1) 
+          proceeds = tradeAmount * tradeUnitFMV * sellRatio ;
+        } 
+        if ( description.indexOf( "Expense" ) === 0 || 
+            tradeType !== 'USD' || 
+            description.indexOf( "Gift" ) === 0 ) { //2. A sale as means to pay an expense, then the proceeds will be the FMV of the amount                           
+          proceeds = amounti * unitFMV * sellRatio ;
+        }
+        
+        
+        //* sorted0SellRatio
+        var thisFeeRecord = firstIn.feesRecord.map( a => Math.round( a * sorted0SellRatio * 100 ) / 100 ) ; //creates fees array adjusted for sell ratio    
+        var newFee        = Math.round( fee * sellRatio *  100 ) / 100;
+        var phis          = thisFeeRecord.concat( newFee ) ;
+        var feeTot        = phis.reduce( reducer ) ;
+        phis              = phis.join( ", " ) || "" ; //creating string of fees to display in sells
+          
+        costBasis = amounti * ( unitCostBasis0  ) - newFee ; //+ unitFee
+        
+        //Logger.log( 'partial costBasis: ' , costBasis ) ;
+        //Logger.log('amounti < amount0  ','amounti',amounti,'amount0: ',amount0 , 'unitCostBasis0: ',unitCostBasis0 , 'unitFee: ', unitFee , 'newFee: ',newFee , 'feeTot: ',feeTot)
+
+        
+        if ( description.indexOf( "Gift" ) != 0 ) { 
+          gainLoss =  proceeds - costBasis ; 
+        }
+        else { 
+          gainLoss = 0 ; 
+        } ;
+        
+        //this finds one year from the time of dateAquired from firstIn
+        var oneYear = new Date( date0.getFullYear() + 1 , date0.getMonth() , date0.getDate() + 1 ) ; 
+        if ( description.indexOf( "Gift" ) === 0 ) {
+          term = "Gift" ;
+        }
+        else if ( date.valueOf() < oneYear.valueOf() ) {
+          term = "Short" ;
+        }
+        else {
+          term = "Long" ;
+        } ;
+        
+        var acts = firstIn.accountRecord.join( ", " ) || "-" ;
+        var ids  = firstIn.IDrecord.join( ", " ) || "-" ;
+        
+        var dts00 = []
+        
+        if ( description.indexOf("Transfer") !== 0 ) {
+          for ( var i = 0 ; i < firstIn.dateRecord.length ; i++ ) {
+            dts00.push( firstIn.dateRecord[ i ].toLocaleDateString('en-US') ) ;
+          }
+        }
+        
+        var dts  = dts00.join( ", " ) || "-" ;
+        
+        divs = firstIn.dividends * sorted0SellRatio ;
+        
+        if ( costBasis > 0.01 ) {
+          var divPer   = ( ( divs ) / costBasis ) ;
+          var gLPer    = ( ( proceeds - costBasis ) / costBasis )  ;
+          var gLPerDiv = ( ( divs + proceeds - costBasis ) / costBasis )  ;
+        }
+        else {
+          var divPer   = 1 ;
+          var gLPer    = 1  ;
+          var gLPerDiv = 1 ;
+        }
+          
+        var timeHeld;
+        if ( firstIn.giftDate ) {
+          timeHeld = ( date.getTime() - firstIn.giftDate.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+        }
+        else {
+          timeHeld = ( date.getTime() - firstIn.dateAquired.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+        } ;
+        
+        var oneYearGift = new Date( giftDate0.getFullYear() + 1 , giftDate0.getMonth() , giftDate0.getDate() + 1 ) ;
+        
+        //the second if boolean checks if a gift is sold within a year of recieving the gift (and will not display annual results)
+        if ( ( term === "Short" || term === "Gift"  || date < oneYearGift || costBasis<0.01 ) && stAnnualROI === 0 ) { 
+          annGLPer    = 0 ;
+          annDivPer   = 0 ;
+          annGLPerDiv = 0 ;
+        }
+        else {
+          annGLPer    = gLPer / timeHeld ;
+          annDivPer   = divPer / timeHeld ;
+          annGLPerDiv = gLPerDiv / timeHeld ;
+        } ;
+        
+        sellObj = { 
+          account     : account ,  
+          amount       : amounti , 
+          type         : type,     
+          dateAquired  : date0 , 
+          dateDisposed : date , 
+          proceeds     : proceeds , 
+          costBasis    : costBasis , 
+          gainLoss     : gainLoss ,
+          term         : term ,             
+          feeTot       : feeTot ,   
+          phis         : phis ,        
+          acts         : acts , 
+          ids          : ids ,                
+          dts          : dts ,          
+          dividends    : divs ,     
+          gLPer        : gLPer ,
+          annGLPer     : annGLPer ,      
+          divPer       : divPer ,     
+          gLPerDiv     : gLPerDiv ,  
+          annDivPer    : annDivPer ,
+          annGLPerDiv  : annGLPerDiv , 
+          giftDate     : giftDate0
+        } ;
+        
+        thisBatch.push( sellObj ) ;
+        
+      }         
+      
+      else if ( description.indexOf("Transfer") === 0 ) {  //4. a transfer, then change the first sorted pile's account to the new account. Record the transfer account, ID, and date.  
+        
+        var toAccount = description.slice( 12 , description.length );
+        var newUnitCostBasis = unitCostBasis0 + unitFee 
+        
+        var makeNew = new Pile( toAccount , date0 , ID0 , 
+                               amounti , type0 , newtradeAmount , tradeType0 , 
+                               description0 , unitFMV0 , tradeUnitFMV0 , fee , feesRecord0 , 
+                               accountRecord0 , IDrecord0 , dateRecord0 , newUnitCostBasis ) ;
+        
+
+        
+        makeNew.feesRecord.push( newFee * sorted0SellRatio ) ; //- unitFee * amount0
+        makeNew.accountRecord.push( account ) ;
+        makeNew.IDrecord.push( ID ) ;
+        makeNew.dateRecord.push( date ) ;
+        makeNew.dividends = firstIn.dividends ; //added later
+        
+        if (makeNew.feesRecord.length = 2) { //just dealing with the first item in something that looks like this [ [] , account ]
+          makeNew.feesRecord[0] = makeNew.feesRecord[0][0]
+        }
+        
+        for ( var j = 0 ; j < makeNew.feesRecord.length ; j++ ) {
+          makeNew.feesRecord[j] *= sorted0SellRatio ;
+        }
+        
+        if ( accountRecord0 = [] ) { //again dealing with a [] at the start of these
+          
+          makeNew.dateRecord.shift() ;
+          makeNew.IDrecord.shift() ;
+          makeNew.accountRecord.shift() ;
+        }
+        
+        
+        
+       // Logger.log(makeNew)
+        
+        piles.push( makeNew ) ;
+        //Logger.log( thisBatch)
+      } //end transfer
+      
+      firstIn.amount -= amounti  //Update pile by subtracting amount from the first sorted pile. (also ajdust the trade amount from first sorted pile)
+      firstIn.tradeAmount -= newtradeAmount
+      firstIn.feesRecord = firstIn.feesRecord.map( a => Math.round( a * ( 1 - sorted0SellRatio ) * 100 ) / 100 ) ; //updates pile fees
+      firstIn.dividends -= divs ;
+      
+      amounti = 0;   
+      
+    }
+    
+    //_____________________________________________________________________________________________________________________________________________________________________________
+    
+    else if (amounti != 0) { //if the order amount is bigger than the first sorted pile, and is:
+      //Logger.log( 'else  ','amounti', amounti )
+      var sellRatio = amount0 / - amount ; //fuck if i change amounti to the original it might mess things up
+      var sell;
+      
+      var unitFee =  fee / amount // amount  ;
+      
+      var newFee = Math.round( fee * sellRatio * 100 ) / 100;
+      
+      //if negative, the order could be:
+      //1. Sell
+      //2. Expense
+      //3. Gift given
+      //4. Transfer
+      
+      if ( description.indexOf( "Expense" ) === 0 || description.indexOf( "Buy Asset" ) === 0 || description.indexOf( "Sell" ) === 0 || description.indexOf( "Gift" ) === 0 ) {
+            
+            if ( description.indexOf( "Sell" ) === 0 ) {  //1. A sale for tanglibe value (USD, BTC, etc.), then the proceeds will be exact conversion (USD = 1) 
+              Logger.log( amount0, amounti, sellRatio )
+              proceeds = tradeAmount * tradeUnitFMV * sellRatio;
+            } 
+            
+            if (description.indexOf( "Expense" ) === 0 || 
+                description.indexOf( "Gift" ) === 0 || 
+              tradeType !== 'USD' ) { //2. A sale as means to pay an expense, then the proceeds will be the FMV of the amount                          
+             //return 'hi'
+              proceeds = amount0 * unitFMV * sellRatio ;
+              //Logger.log(unitFMVs[i])
+              
+            }
+            
+            
+            if (description.indexOf( "Expense" ) === 0 || 
+                description.indexOf( "Gift" ) === 0 ||
+              description.indexOf( "Sell" ) === 0 ) { //these both push a sell
+                
+                var thisFeeRecord = firstIn.feesRecord.map( rounder ) ; //creates fees array adjusted for sell ratio    
+
+                var phis          = thisFeeRecord.concat( newFee ) ;
+                var feeTot        = phis.reduce( reducer ) ;
+                //Logger.log( 'else  ', 'phis:',phis, '___ feeTot:',feeTot) 
+                phis              = phis.join( ", " ) || "" ; //creating string of fees to display in sells
+                
+                costBasis = ( amount0 * (unitCostBasis0  )) - newFee //-feeTot; //+ unitFee
+                //Logger.log( 'unitCostBasis0 + unitFee' , unitCostBasis0 + unitFee ) ;
+                //Logger.log( 'amount0 * 2 ' , amount0 * 2 )
+                //Logger.log('amount0 * (unitCostBasis0 + unitFee )' , amount0 * (unitCostBasis0 + unitFee ) ) ;
+                //Logger.log( 'whole costBasis: ' , costBasis) ;
+                //Logger.log('else  ', 'amount0: ',amount0 , 'unitCostBasis0: ',unitCostBasis0 , 'unitFee: ', unitFee , 'newFee: ',newFee , 'feeTot: ',feeTot) ;
+                
+                gainLoss =  proceeds - costBasis ;
+                //Logger.log([ amount0 , unitCostBasis0 , newFee ]) 
+                var oneYear = new Date( date0.getFullYear() + 1 , date0.getMonth() , date0.getDate() + 1 ) ;
+                if ( description.indexOf( "Gift" ) === 0 ) {
+                  term = "Gift" ;
+                }
+                else if ( date.valueOf() < oneYear.valueOf() ) {
+                  term = "Short" ;
+                }
+                else {
+                  term = "Long" ;
+                }
+                
+                var acts = firstIn.accountRecord.join( ", " ) || "-" ;
+                var ids = firstIn.IDrecord.join( ", " ) || "-" ;
+                
+                if ( description.indexOf("Transfer") !== 0 ) {
+                  for ( var i = 0 ; i < firstIn.dateRecord.length ; i++ ) {
+                    firstIn.dateRecord[ i ] =  firstIn.dateRecord[ i ].toLocaleDateString('en-US')
+                  }
+                }
+                
+                var dts = firstIn.dateRecord.join( ", " ) || "-" ;
+                
+                var divs = firstIn.dividends || 0 ;
+                
+                if ( costBasis > 0.01 ) {
+                  var divPer = ( ( divs ) / costBasis ) ;
+                  var gLPer = ( ( proceeds - costBasis ) / costBasis ) ;
+                  var gLPerDiv = ( ( divs + proceeds - costBasis ) / costBasis ) ;
+                }
+                else {
+                  var divPer = 1 ;
+                  var gLPer = 1 ;
+                  var gLPerDiv = 1 ;
+                }
+                
+                var timeHeld;
+                if ( firstIn.giftDate ) {
+                  timeHeld = ( date.getTime() - firstIn.giftDate.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+                }
+                else {
+                  timeHeld = ( date.getTime() - firstIn.dateAquired.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+                }
+                
+                var oneYearGift = new Date( giftDate0.getFullYear() + 1 , giftDate0.getMonth() , giftDate0.getDate() + 1 )
+                
+                //the second if boolean checks if a gift is sold within a year of recieving the gift (and will not display annual results)
+                if ( ( term === "Short" || term === "Gift"  || date < oneYearGift || costBasis < 0.01 ) && stAnnualROI === 0 ) { 
+                  annGLPer = 0 ;
+                  annDivPer = 0 ;
+                  annGLPerDiv = 0 ;
+                }
+                else {
+                  annGLPer = gLPer / timeHeld ;
+                  annDivPer = divPer / timeHeld ;
+                  annGLPerDiv = gLPerDiv / timeHeld ;
+                }
+                
+                sellObj = { account: account ,  amount: amount0 ,    type: type,     dateAquired: date0 , 
+                           dateDisposed: date , proceeds: proceeds , costBasis: costBasis , gainLoss: gainLoss ,
+                           term: term ,               feeTot: feeTot ,     phis: phis ,           acts: acts , 
+                           ids: ids ,                 dts: dts ,           dividends: divs ,      gLPer: gLPer ,
+                           annGLPer: annGLPer ,       divPer: divPer ,     gLPerDiv: gLPerDiv ,   annDivPer: annDivPer ,
+                           annGLPerDiv: annGLPerDiv , giftDate: giftDate0
+                          } ;
+                
+                thisBatch.push( sellObj )
+                
+              }
+            
+            sortedPiles[ 0 ].amount = 0 ; //make the first sorted amount to be equal to zero. (for 1. 2. or 3.) (this object pile will be removed from the piles array later)
+          }
+      
+      if (description.indexOf("Transfer") === 0) {  //4. a transfer, then change the first sorted pile's account to the new account. Record the transfer account, ID, and date. 
+        
+        var toAccount = description.slice(12 , description.length ) ;
+        
+        firstIn.account = toAccount ;
+        
+        firstIn.unitCostBasis += ( unitFee ) ; //adds any transfer fees to cost basis
+        
+        //keeps the record fresh
+        firstIn.feesRecord.push( fee *  sellRatio ) ;
+        firstIn.accountRecord.push( account ) ;
+        firstIn.IDrecord.push( ID ) ;
+        firstIn.dateRecord.push( date ) ;
+      } //does not push a sell
+      
+      sortedPiles.shift() ;  //shift (remove) the first sorted pile out of the sorted array
+      
+      amounti -= amount0 ; 
+      //fee -= newFee ;
+      //Logger.log('else  ', 'fee before', fee, 'newFee', newFee)
+
+    } //end bigger sell 
+
+  } //end while loop
+  return thisBatch
+}
+
+function Eliminator( thisSellBatch , filterAccounts , datei , datef , giftp, description ) {
+  
+  var firstSell = thisSellBatch[ 0 ] ;
+  var lastSell  = thisSellBatch[ thisSellBatch.length - 1 ] ;
+  var check     = 0 ; 
+  
+  //removes accounts
+  
+  if ( !thisSellBatch[0].dateDisposed ) { //remove transfers
+    return 0 ;
+  }
+  
+  for ( var j = 0 ; j < filterAccounts.length ; j++ ) {
+    if ( firstSell.account === filterAccounts[ j ] ) {
+      check++
+    } 
+  } ;
+  
+  if ( check === 0 ) {
+    return 0 ; 
+  }
+  
+  check = 0 ;
+  
+  //removes dates outside of time duration
+  //Logger.log([datei,firstSell.dateDisposed])
+  if (!(datei.getTime() <= firstSell.dateDisposed.getTime() && firstSell.dateDisposed.getTime() <= datef.getTime() ) && thisSellBatch.length > 0 ) {
+    return 0 ;
+  }
+
+  //removes gifts
+  if ( giftp === 0  && description.indexOf("Gift") === 0 ) { //
+    //Logger.log( 'firstSell' , firstSell ) ;
+    return 0 
+  } ;
+  
+return thisSellBatch
+
+}
+
+function Cum( thisSellBatch , stAnnualROI ) {
+  
+  //finding all terms of thisSellBatch
+  var sl ;
+  var cum ;
+  var firstSell = thisSellBatch[ 0 ] ;
+  var lastSell = thisSellBatch[ thisSellBatch.length - 1 ] ;
+  var account = firstSell.account ;
+  var dateSold = firstSell.dateDisposed ;
+  var type = firstSell.type ;
+  
+  var proceedsCum   = 0 ;  
+  var costBasisCum  = 0 ;
+  var gainLossCum   = 0 ;
+  var dividendsCum  = 0 ;
+  var feesCum       = 0 ; 
+  
+  var amount = 0 ;
+  var terms = [ ] ;
+  for ( var j = 0 ; j < thisSellBatch.length ; j++ ) {
+    sl = thisSellBatch[ j ] ;
+    terms.push( sl.term ) ; 
+    amount += sl.amount
+    proceedsCum += sl.proceeds ;
+    costBasisCum += sl.costBasis ;
+    gainLossCum += sl.gainLoss ;
+    dividendsCum += sl.dividends ;
+    feesCum += sl.feeTot ;
+  } ;
+  
+  //if this sell batch starts with long-term sell and end with short-term sell
+  //then these need to be seperated
+  if ( terms.indexOf( "Long" ) === 0 && terms.lastIndexOf( "Short" ) === terms.length - 1 ) { 
+    
+    var lastLong = terms.lastIndexOf( "Long" ) ;
+    
+    var lastSellLong = thisSellBatch[lastLong] ;
+    
+    var sumAmountLong = 0 ;
+    var sumProceedsLong = 0 ;
+    var sumCostBasisLong = 0 ;
+    var sumGainLossLong = 0 ;
+    var sumDividendsLong = 0 ;
+    var sumFeesLong = 0 ;
+    
+    var timeHeldAvgLong = 0;
+    var timeHeldAvgShort = 0;
+    
+    for ( var j = 0 ; j < lastLong + 1 ; j++ ) { //sum all the long terms
+      sl = thisSellBatch[ j ] ;
+      sumAmountLong += sl.amount ; 
+      sumProceedsLong += sl.proceeds ; 
+      sumCostBasisLong += sl.costBasis ; 
+      sumGainLossLong += sl.gainLoss ;
+      //Logger.log('sumDividendsLong: ' , sumDividendsLong , 'sl.dividends: ' , sl.dividends)
+      sumDividendsLong += sl.dividends ;
+      //Logger.log('sumDividendsLong: ' , sumDividendsLong , 'sl.dividends: ' , sl.dividends)
+      sumFeesLong += sl.feeTot ;
+      
+      
+      if ( sl.giftDate ) {
+        timeHeldAvgLong += sl.amount * ( sl.dateDisposed.getTime() - sl.giftDate.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+      }
+      else {
+        timeHeldAvgLong += sl.amount * ( sl.dateDisposed.getTime() - sl.date.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+      } 
+    }
+    
+    timeHeldAvgLong = timeHeldAvgLong / sumAmountLong ;
+    
+    if ( sumCostBasisLong > 0.01 ) {
+      var gLPerLong = ( ( sumProceedsLong - sumCostBasisLong ) / sumCostBasisLong )  ;     
+      var divPerLong = ( ( sumDividendsLong ) / sumCostBasisLong )  ;
+      var gLPerDivLong = ( ( sumDividendsLong + sumProceedsLong - sumCostBasisLong ) / sumCostBasisLong )  ;
+    }
+    else {
+      var gLPerLong = 1 ;     
+      var divPerLong = 1 ;
+      var gLPerDivLong = 1 ;
+    }
+
+    var annGLPerLong = 0 ;
+    var annDivPerLong = 0 ;
+    var annGLPerDivLong = 0 ; 
+
+    var oneYearGift = new Date( firstSell.giftDate.getFullYear() + 1 , firstSell.giftDate.getMonth() , firstSell.giftDate.getDate() + 1 ) ;
+    if ( firstSell.dateDisposed >= oneYearGift ) { 
+      annGLPerLong = gLPerLong / timeHeldAvgLong ;
+      annDivPerLong = divPerLong / timeHeldAvgLong ;
+      annGLPerDivLong = gLPerDivLong / timeHeldAvgLong ;
+    }
+   
+    if ( firstSell.dateAquired.getTime() === lastSellLong.dateAquired.getTime() ) {
+      var dateAquiredLong = firstSell.dateAquired ; 
+    }
+    else {
+      dateAquiredLong = "Various"
+    }
+    
+    //proceed to find the short term "cum"s 
+    var sumShort = amount - sumAmountLong ;
+    var sumProceedsShort = proceedsCum - sumProceedsLong ; 
+    var sumCostBasisShort = costBasisCum - sumCostBasisLong ; 
+    var sumGainLossShort = gainLossCum - sumGainLossLong ; 
+    var sumDividendsShort = dividendsCum - sumDividendsLong ;
+    var sumFeesShort = feesCum - sumFeesLong ;
+    
+    for ( var j = lastLong + 1 ; j < thisSellBatch.length ; j++ ) {
+      if ( sl.giftDate ) {
+        timeHeldAvgShort += sl.amount * ( sl.dateDisposed.getTime() - sl.giftDate.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+      }
+      else {
+        timeHeldAvgShort += sl.amount * ( sl.dateDisposed.getTime() - sl.dateAquired.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+      } ;
+    } ;
+    
+    timeHeldAvgShort = timeHeldAvgShort / sumShort ;
+    
+    if ( sumCostBasisShort > 0.01 ) {
+      var gLPerShort = ( ( sumProceedsShort - sumCostBasisShort ) / sumCostBasisShort ) ;       
+      var divPerShort = ( ( sumDividendsShort ) / sumCostBasisShort ) ;
+      var gLPerDivShort = ( ( sumDividendsShort + sumProceedsShort - sumCostBasisShort ) / sumCostBasisShort )  ;
+    }
+    else {
+      var gLPerShort = 1 ;   
+      var divPerShort = 1 ;
+      var gLPerDivShort = 1 ;
+    }
+  
+    var annGLPerShort ;
+    var annDivPerShort ;
+    var annGLPerDivShort ;
+    
+    if ( stAnnualROI === 0 ) {
+      annGLPerShort = 0 ; //gLPerShort / timeHeldAvgShort ;
+      annDivPerShort = 0 ; // divPerShort / timeHeldAvgShort ;
+      annGLPerDivShort = 0 ; //gLPerDivShort / timeHeldAvgShort ;
+    }
+    else if ( stAnnualROI === 1 ) {
+      annGLPerShort = gLPerShort / timeHeldAvgShort ;
+      annDivPerShort = divPerShort / timeHeldAvgShort ;
+      annGLPerDivShort = gLPerDivShort / timeHeldAvgShort ;
+    } 
+    
+    var firstShortSell = thisSellBatch[ lastLong + 1 ] 
+    
+    if ( firstShortSell.dateAquired.getTime() === lastSell.dateAquired.getTime() ) {
+      var dateAquiredShort = lastSell.dateAquired ; 
+    }
+    else {
+      dateAquiredShort = "Various"
+    }
+    
+    cum = { 
+      cumShort: { 
+        account      : account , 
+        amount       : sumShort ,         
+        type         : type ,        
+        dateAquired  : dateAquiredShort , 
+        dateDisposed : dateSold ,  
+        term         : "Short" ,
+        proceeds     : sumProceedsShort , 
+        costBasis    : sumCostBasisShort , 
+        gainLoss     : sumGainLossShort ,
+        gLPer        : gLPerShort ,
+        annGLPer     : annGLPerShort ,
+        dividends          : sumDividendsShort ,
+        divPer       : divPerShort ,
+        annDivPer    : annDivPerShort ,
+        gLPerDiv     : gLPerDivShort , 
+        annGLPerDiv  : annGLPerDivShort ,
+        feeTot       : sumFeesShort   
+      } ,
+      cumLong: {
+        account      : account ,   
+        amount       : sumAmountLong ,     
+        type         : type ,            
+        dateAquired  : dateAquiredLong , 
+        dateDisposed : dateSold ,
+        term         : "Long" ,
+        proceeds     : sumProceedsLong , 
+        costBasis    : sumCostBasisLong , 
+        gainLoss     : sumGainLossLong ,
+        gLPer        : gLPerLong ,
+        annGLPer     : annGLPerLong ,
+        dividends          : sumDividendsLong ,
+        divPer       : divPerLong ,
+        annDivPer    : annDivPerLong ,
+        gLPerDiv     : gLPerDivLong , 
+        annGLPerDiv  : annGLPerDivLong ,
+        feeTot       : sumFeesLong 
+      } 
+    } ; //end of cum Object
+  } //end mixed cum
+  
+  else {
+    
+    //if first and last date/time in thisSellBatch is equal, then they are all equal to any of thisSellBatch's elements' "date"
+    if ( firstSell.dateAquired.getTime() === lastSell.dateAquired.getTime() ) {
+      var dateAquired = firstSell.dateAquired ; 
+    }  
+    else { 
+      dateAquired = "Various" ; 
+    }
+    
+    //finding the cummulative values for thisSellBatch
+    
+    var term ;
+    //if the first term is short, then they will all be short
+    if ( terms.indexOf( "Short" ) === 0 ) { 
+      term = "Short" ;
+    } 
+    //if the last term is long, then they will all be long
+    else if ( terms.lastIndexOf( "Long" ) === terms.length -1 ) {
+      term = "Long" ;
+    } 
+    //if the first term is a gift, they all are
+    else if ( terms[0] === "Gift" ) {
+      term = "Gift" 
+    } ;
+    
+    var timeHeldAvg = 0 ;
+    
+    for ( var j = 0 ; j < thisSellBatch.length ; j++ ) {
+      sl = thisSellBatch[ j ] ;
+      if ( sl.giftDate ) {
+        timeHeldAvg += sl.amount * ( sl.dateDisposed.getTime() - sl.giftDate.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+      }
+      else {
+        timeHeldAvg += sl.amount * ( sl.dateDisposed.getTime() - sl.dateAquired.getTime() ) / ( 1000 * 3600 * 24 * 365 ) ;
+      } ; 
+    } ;
+    
+    timeHeldAvg = timeHeldAvg / amount ;
+    
+    var gLPer ;
+    var divPer ;
+    var gLPerDiv ;
+    
+    if ( costBasisCum > 0.01 ) {
+      gLPer = ( ( proceedsCum - costBasisCum ) / costBasisCum )  ;     
+      divPer = ( ( dividendsCum ) / costBasisCum )  ;
+      gLPerDiv = ( ( dividendsCum + proceedsCum - costBasisCum ) / costBasisCum ) ;
+    }
+    else {
+      var gLPer = 1 ;   
+      var divPer = 1 ;
+      var gLPerDiv = 1 ;
+    }
+    
+    var annGLPer ;
+    var annDivPer ;
+    var annGLPerDiv ;
+    
+    if ( stAnnualROI === 0 ) {
+      annGLPer = 0 ; 
+      annDivPer = 0 ; 
+      annGLPerDiv = 0 ; 
+    }
+    else if ( stAnnualROI === 1 ) {
+      annGLPer = gLPer / timeHeldAvg ;
+      annDivPer = divPer / timeHeldAvg ;
+      annGLPerDiv = gLPerDiv / timeHeldAvg ;
+    } 
+    
+    var oneYearGift = new Date( firstSell.giftDate.getFullYear() + 1 , firstSell.giftDate.getMonth() , firstSell.giftDate.getDate() + 1 ) ;
+    if ( firstSell.dateDisposed >= oneYearGift ) { 
+      annGLPer = gLPer / timeHeldAvg ;
+      annDivPer = divPer / timeHeldAvg ;      
+      annGLPerDiv = gLPerDiv / timeHeldAvg ;
+    }
+    
+    cum = { 
+      cumAll : {
+        account      : account ,   
+        amount       : amount , 
+        type         : type ,        
+        dateAquired  : dateAquired , 
+        dateDisposed : dateSold ,
+        term         : term ,               
+        proceeds     : proceedsCum ,  
+        costBasis    : costBasisCum , 
+        gainLoss     : gainLossCum ,
+        gLPer        : gLPer ,
+        annGLPer     : annGLPer ,     
+        dividends    : dividendsCum ,    
+        divPer       : divPer ,   
+        annDivPer    : annDivPer , 
+        gLPerDiv     : gLPerDiv , 
+        annGLPerDiv  : annGLPerDiv ,
+        feeTot       : feesCum 
+    } 
+    } ; //end cum Object
+  } ; //end the if else chain of deciding if batch is comprised of all short, all long, or a mixture of each term sells
+  
+  return cum ;
+  
+}
+
+function SortingHat( sells ) {
+  
+  var sl;
+  var sell;
+  var gLPer;
+  var divROI;
+  var gLPerDiv;
+  
+  var sortedSells = [] ;
+  
+  var shortCounter = 0 ;
+  var shortProceedsSum = 0 ;
+  var shortCostBasisSum = 0 ;
+  var shortGainLossSum = 0 ;
+  var shortDivSum = 0 ;
+  var shortFeesSum = 0 ;
+  
+  var longCounter = 0 ;
+  var longProceedsSum = 0 ;
+  var longCostBasisSum = 0 ;
+  var longGainLossSum = 0 ;
+  var longDivSum = 0 ;
+  var longFeesSum = 0 ;
+  
+  var giftCounter = 0 ;
+  var giftValueSum = 0 ;
+  var giftCostBasisSum = 0 ;
+  var giftFeesSum = 0 ;
+  var giftDivSum = 0 ;
+  
+  //need to make a verticle array for descriptions to know the last index of the three types
+  var sellTerms = [] ;
+  
+  for ( var i = 0 ; i < sells.length ; i++ ) { //remember if the code got this far then "sells" is still an array of objects 
+    sellTerms.push( sells[i].term )
+  } ;
+  
+  var totals;
+  for ( var i = 0 ; i < sells.length ; i++ ) { //groups all the short terms
+    sl = sells[ i ] ;
+    //Logger.log('sorting hat ln 41 sl.dividends:  ', sl.dividends)
+    if ( sl.term === "Short" ) {
+      shortCounter++ ;
+      
+      if (shortCounter === 1) {
+        sortedSells.unshift( ["Short-Term"] )
+      }
+      
+      sell = [ sl.account , 
+              sl.amount , 
+              sl.type ,    
+              sl.dateAquired , 
+              sl.dateDisposed , 
+              sl.term ,   
+              sl.proceeds , 
+              sl.costBasis ,
+              sl.gainLoss , 
+              sl.gLPer ,       
+              sl.annGLPer ,     
+              sl.dividends ,    
+              sl.divPer ,   
+              sl.annDivPer , 
+              sl.gLPerDiv , 
+              sl.annGLPerDiv ,  
+              sl.feeTot , 
+              sl.phis , 
+              sl.dts, 
+              sl.acts , 
+              sl.ids ] ;   
+      
+      sortedSells.push( sell ) ;
+      
+      shortProceedsSum += sl.proceeds ;
+      shortCostBasisSum += sl.costBasis ;
+      shortGainLossSum += sl.gainLoss ;
+      shortFeesSum += sl.feeTot ;
+      shortDivSum += sl.dividends ;
+      
+      if ( i === sellTerms.lastIndexOf("Short") ) {
+        
+        if ( shortCostBasisSum > 0.01 ) {
+          gLPer = ( ( shortProceedsSum - shortCostBasisSum ) / shortCostBasisSum )  ;
+          divROI = ( shortDivSum / shortCostBasisSum )  ;
+          gLPerDiv = ( ( shortDivSum + shortProceedsSum - shortCostBasisSum ) / shortCostBasisSum )  ;
+        }
+        else {
+          gLPer = 1  ;
+          divROI = 1  ;
+          gLPerDiv = 1 ;
+        }
+        
+        totals = [ '' , 
+                  '' , 
+                  '' , 
+                  '' , 
+                  'Totals:' , 
+                  '' , 
+                  shortProceedsSum, 
+                  shortCostBasisSum, 
+                  shortGainLossSum , 
+                  gLPer , 
+                  '' , 
+                  shortDivSum ,
+                  divROI ,
+                  '' ,
+                  gLPerDiv ,
+                  '' ,
+                  shortFeesSum || 0 ] ;
+        
+        sortedSells.push( totals ) ;
+        
+      } ;
+    } ; // end shorts
+  } ; // end for loop
+  
+  for ( var i = 0 ; i < sells.length ; i++ ) {
+    sl = sells[ i ] ;
+    if ( sl.term === "Long" ) {
+      longCounter++ ;
+      if (longCounter === 1) {
+        if (shortCounter > 0 ) { //if there are no shorts then no want this space
+          sortedSells.push( [ ] ) ; 
+        }
+        sortedSells.push( ["Long-Term"] )
+      }
+      
+      sell = [ sl.account , 
+              sl.amount , 
+              sl.type ,    
+              sl.dateAquired , 
+              sl.dateDisposed ,
+              sl.term ,   
+              sl.proceeds , 
+              sl.costBasis ,
+              sl.gainLoss ,
+              sl.gLPer ,       
+              sl.annGLPer ,     
+              sl.dividends ,    
+              sl.divPer ,   
+              sl.annDivPer , 
+              sl.gLPerDiv , 
+              sl.annGLPerDiv ,  
+              sl.feeTot , 
+              sl.phis , 
+              sl.dts, 
+              sl.acts , 
+              sl.ids ] ;  
+      
+      sortedSells.push( sell ) ;
+      
+      longProceedsSum += sl.proceeds ;
+      longCostBasisSum += sl.costBasis ;
+      longGainLossSum += sl.gainLoss ;
+      longFeesSum += sl.feeTot ;
+      longDivSum += sl.dividends ;
+      
+      if ( i === sellTerms.lastIndexOf("Long") ) {
+        
+        if ( longCostBasisSum > 0.01 ) {
+          gLPer = ( ( longProceedsSum - longCostBasisSum ) / longCostBasisSum )  ;
+          divROI = ( longDivSum / longCostBasisSum )  ;
+          gLPerDiv = ( ( longDivSum + longProceedsSum - longCostBasisSum ) / longCostBasisSum ) ; 
+        }
+        else {
+          gLPer = 1 ;
+          divROI = 1  ;
+          gLPerDiv = 1 ;
+        }
+        totals = [ '' , 
+                  '' , 
+                  '' , 
+                  '' , 
+                  'Totals:' , 
+                  '' , 
+                  longProceedsSum, 
+                  longCostBasisSum, 
+                  longGainLossSum , 
+                  gLPer , 
+                  '' , 
+                  longDivSum ,
+                  divROI ,
+                  '' ,
+                  gLPerDiv ,
+                  '' ,
+                  longFeesSum || 0 ] ;
+        
+        sortedSells.push( totals ) ;
+      } ;
+    } ; // end if longs
+  } ; // end for loop
+
+  for ( var i = 0 ; i < sells.length ; i++ ) {
+    sl = sells[ i ] ;
+    if ( sl.term.indexOf("Gift") === 0 ) { //.indexOf("Gift")
+      giftCounter++ ;
+      
+      if (giftCounter === 1 ) {
+        if (shortCounter > 0 || longCounter > 0 ) { // if there are no short or longs then we wouldn't want this space
+          sortedSells.push( [ ] ) ; 
+        } ;
+        sortedSells.push( ["Gifts"] )
+      } ;
+      
+      sell = [ sl.account , 
+              sl.amount , 
+              sl.type ,    
+              sl.dateAquired , 
+              sl.dateDisposed , 
+              sl.term , 
+              sl.proceeds , 
+              sl.costBasis ,
+              "-" , 
+              sl.gLPer ,       
+              sl.annGLPer ,     
+              sl.dividends ,    
+              sl.divPer ,   
+              sl.annDivPer , 
+              sl.gLPerDiv , 
+              sl.annGLPerDiv , 
+              sl.feeTot , 
+              sl.phis , 
+              sl.dts, 
+              sl.acts , 
+              sl.ids ] ; 
+      
+      sortedSells.push( sell ) ;
+      
+      giftValueSum += sl.proceeds ;
+      giftCostBasisSum += sl.costBasis ;
+      giftFeesSum += sl.feeTot ;
+      giftDivSum += sl.dividends ;
+      //Logger.log('sortingHat ln 232 sl.dividends: ',sl.dividends)
+      if ( i === sellTerms.lastIndexOf("Gift") ) {
+        divROI = ( giftDivSum / giftCostBasisSum )  ; 
+        gLPer = ( ( giftValueSum - giftCostBasisSum ) / giftCostBasisSum )  ;
+        gLPerDiv = ( ( giftValueSum + giftDivSum - giftCostBasisSum ) / giftCostBasisSum )  ;
+        totals = [ '' , 
+                  '' , 
+                  '' , 
+                  '' , 
+                  'Totals:' , 
+                  '' , 
+                  giftValueSum, 
+                  giftCostBasisSum, 
+                  '' , 
+                  gLPer , 
+                  '' , 
+                  giftDivSum ,
+                  divROI ,
+                  '' ,
+                  gLPerDiv ,
+                  '' ,
+                  giftFeesSum || 0 ] ;
+        
+        sortedSells.push( totals ) ;
+      } ;
+    } ; // end if gift
+  } ; // end for loop
+  return sortedSells ;
+}
+
+function GrandTotals( sells ) {
+  
+  var sl;
+  var sell;
+  var gLPer;
+  var divROI;
+  var gLPerDiv;
+  
+  var counter = 0 ;
+  var proceedsSum = 0 ;
+  var costBasisSum = 0 ;
+  var gainLossSum = 0 ;
+  var divSum = 0 ;
+  var feesSum = 0 ;
+  
+  //need to make a verticle array for descriptions to know the last index of the three types
+  var sellTerms = [] ;
+  
+  for ( var i = 0 ; i < sells.length ; i++ ) { //remember if the code got this far then "sells" is still an array of objects 
+    sellTerms.push( sells[i].term )
+  } ;
+  
+  var totals;
+  for ( var i = 0 ; i < sells.length ; i++ ) { 
+    sl = sells[ i ] ;
+    
+    proceedsSum += sl.proceeds ;
+    costBasisSum += sl.costBasis ;
+    gainLossSum += sl.gainLoss ;
+    feesSum += sl.feeTot ;
+    divSum += sl.dividends ;
+    
+  } ;
+  
+  gLPer = ( ( proceedsSum - costBasisSum ) / costBasisSum )  ;
+  divROI = ( divSum / costBasisSum )  ;
+  gLPerDiv = ( ( divSum + proceedsSum - costBasisSum ) / costBasisSum )  ;
+  totals = [ '' , 
+            '' , 
+            '' , 
+            '' , 
+            'Grand Totals:' , 
+            '' , 
+            proceedsSum, 
+            costBasisSum, 
+            gainLossSum , 
+            gLPer , 
+            '' , 
+            divSum ,
+            divROI ,
+            '' ,
+            gLPerDiv ,
+            '' ,
+            feesSum || 0 ] ;
+
+return totals ;
+}
+
+function Header( giftp , numGifts ,shortHead ) {
+  //definetely over-engineered since I make the head an object so i could remove the heading by deleting the key or setting the propery equal to zero
+  //however, that would still push a cell and get in the way of things. oh well it works so might as well keep it.
+  var Head = { 
+    
+    //Will be unchanged:
+    act: "Account" , 
+    qty: "Qty." ,
+    desc: "Description" ,
+    dCum: "Date Aquired" ,
+    costb: "Cost Basis" ,
+    gL: "Gain or (Loss)" ,
+    term: "Term/ Gift" , //term will stay and will be removed later if sorted by term ( sorted === 0 ) //also should go to just term if no gifts
+    gLPer: "ROI" ,
+    annGLPer: "Annual Capital ROI" ,
+    dividends: "Dividends Recieved" ,
+    divPer: "Dividend ROI" ,
+    annDivPer: "Annual Dividend ROI" ,
+    gLPerDiv: "Total ROI" ,
+    annGLPerDiv: "Total Annual ROI" ,
+    
+    //can change based on Gift display
+    dGo: "Date Sold/ Disposed" ,
+    proceeds: "Proceeds/ Gift Value" , 
+    
+    //The following may get removed per level of detail
+    Fees: "Fees" ,
+    
+    sumFees: "Total Fees" ,//detail = 0
+    
+    transDs: "Transfer Dates" , //detail = -1 
+    preActs:"Previous Accounts" , 
+    transIDs: "Transfer IDs" 
+  }
+  
+  if ( giftp === 0 || numGifts === 0 ) { //if we hide gifts or there are no gifts, then we will display headings that make sense
+    Head.dGo = "Date Sold" ;
+    Head.proceeds = "Proceeds" ;
+    Head.term = "Term" ;
+  }
+  
+  if ( shortHead === 1 ) {
+    Head.act = "ACT"; 
+    Head.qty = "QTY";
+    Head.desc = "DES";
+    Head.dCum = "Aquired";
+    Head.costb = "CB";
+    Head.gL = "G/(L)";
+    Head.term = "Term"; //term will stay and will be removed later if sorted by term ( sorted === 0 ) //also should go to just term if no gifts
+    Head.gLPer = "ROI";
+    Head.annGLPer = "ANN";
+    Head.dividends = "DIVS";
+    Head.divPer = "DIVS ROI";
+    Head.annDivPer = "DIV ANN";
+    Head.gLPerDiv = "TOT ROI";
+    Head.annGLPerDiv = "TOT ANN";
+    
+    //can change based on Gift display
+    Head.dGo = "Disposed";
+    Head.proceeds = "PRO"; 
+    
+    //The following may get removed per level of detail
+    Head.Fees = "FEES";
+    
+    Head.sumFees = "TOT FEES";//detail = 0
+    
+    Head.transDs = "T Dates"; //detail = -1 
+    Head.preActs ="Prev Acts"; 
+    Head.transIDs = "T IDs" ;
+  }
+  
+  //if i can read the sells or the cums, after they are filtered, then i could find each index and automatically have the header fill
+  
+  return Head ;
+}
+
+function HeaderRow( Head ) {
+ var headerRow = [ Head.act ,    
+                   Head.qty ,       
+                   Head.desc ,     
+                   Head.dCum ,        
+                   Head.dGo ,      
+                   Head.term ,
+                   Head.proceeds ,     
+                   Head.costb ,     
+                   Head.gL ,       
+                   Head.gLPer ,       
+                   Head.annGLPer , 
+                   Head.dividends ,
+                   Head.divPer , 
+                   Head.annDivPer , 
+                   Head.gLPerDiv , 
+                   Head.annGLPerDiv , 
+                   Head.sumFees ,  
+                   Head.Fees ,
+                   Head.transDs , 
+                   Head.preActs ,   
+                   Head.transIDs ] ; 
+  return headerRow ;
+}
+
+function Format( sells, Head , detail , sorted , divp , feesp , gLp , annualROI) {
+  
+  var indxx = sells[ 0 ].indexOf( Head.Fees ) ;
+  
+  if ( detail === 0 ) { // remove transfer(s) info
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      sells[ i ].splice( indxx, 4 ) ;
+    }
+    
+  } ;
+  
+  indxx = sells[ 0 ].indexOf( Head.term ) ;
+  
+  //return sells[ 0 ].indexOf( Head.term )
+  if ( sorted === 0 ) { // remove term column
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      sells[ i ].splice( indxx, 1 ) ;
+    }
+  }
+  //[ div , divgl , divann , glwdiv , glwdivann ]
+  
+  indxx = sells[ 0 ].indexOf( Head.dividends ) ;
+  
+  if ( divp === 0 ) { // remove 
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      sells[ i ].splice( indxx, 5 ) ;
+    }
+  }
+  else if ( gLp === 0 && annualROI === 0 ) {
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      sells[ i ].splice( indxx + 1 , 4 ) ;
+    }
+  }
+  else if ( gLp > 0 && annualROI === 0 ) {
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      sells[ i ].splice( indxx + 2 , 1 ) ;
+      sells[ i ].splice( indxx + 3 , 1 ) ;
+    }
+  }
+  else if ( gLp === 0 && annualROI > 0 ) {
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      sells[ i ].splice( indxx + 1 , 1 ) ;
+      sells[ i ].splice( indxx + 2 , 1 ) ;
+    }
+  }
+  
+  
+  if ( feesp === 0 ) { // remove 
+    indxx = sells[ 0 ].indexOf( Head.sumFees ) ;
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      if ( detail === 1 ) {
+        sells[ i ].splice( indxx, 5 ) ;
+      }
+      else {
+        sells[ i ].splice( indxx, 1 ) ;
+      }
+    }
+  }
+  
+  if ( gLp === 0 ) { // remove 
+    indxx = sells[ 0 ].indexOf( Head.gLPer ) ;
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      sells[ i ].splice( indxx, 1 ) ;
+    }
+  }
+  
+  if ( annualROI === 0 ) { // remove 
+    indxx = sells[ 0 ].indexOf( Head.annGLPer ) ;
+    for ( var i = 0 ; i < sells.length ; i++ ) { 
+      sells[ i ].splice( indxx, 1 ) ;
+    }
+  }
+
+  return sells ;
+  
+}
+
+function UnsortedSells( sells ) {
+  var unsortedSells = [] ;
+  var sell ; 
+  var sl ;
+    for ( var j = 0 ; j < sells.length ; j++ ) {
+      sl = sells[ j ] ;
+      sell = [ sl.account , 
+              sl.amount ,    
+              sl.type ,     
+              sl.dateAquired , 
+              sl.dateDisposed , 
+              sl.term , 
+              sl.proceeds , 
+              sl.costBasis , 
+              sl.gainLoss , 
+              sl.gLPer ,       
+              sl.annGLPer ,     
+              sl.dividends ,    
+              sl.divPer ,   
+              sl.annDivPer , 
+              sl.gLPerDiv , 
+              sl.annGLPerDiv ,  
+              sl.feeTot ,       
+              sl.phis ,         
+              sl.dts ,      
+              sl.acts ,      
+              sl.ids     ] ; 
+      
+      unsortedSells.push( sell ) ;    
+    } ;  
+  return unsortedSells ;
+}
+
+let onlyUnique = (value, index, self) => ( self.indexOf(value) === index )
+
+let filterZeros = x => ( x.amount > 0 ) ;
+
+let filterZeros2 = x => ( x != 0 ) ;
+
+let filterMTBracks = x => ( x != [] ) ;
+
+let filterMTBracks2 = x => ( x.length > 0 ) ;
+
+let filterNullNull = x => ( x[0] != null ) ;
+
+let filterAccountAndType = ( account , type ) => x =>  ( x.account === account && x.type === type ) ;
+
+let sorter = ( x , y ) => ( (new Date(x.dateAquired)).getTime() - (new Date(y.dateAquired)).getTime() ) ;
+
+let rangeSorter = ( x , y ) => ( (new Date(x[1])).getTime() - (new Date(y[1])).getTime() ) ;
+
+let rangeSorter2 = ( x , y ) => ( (new Date(x[1])).getTime() - (new Date(y[1])).getTime() || x[3] - y[3] ) ;
+
+let brackets = x => x[0] ;
+
+let rounder = a => Math.round( Number(a) * 100 ) / 100 ;
+
+let reducer = ( a , b  ) => Number(a) + Number(b) ;
+
+let reducer2 = ( a , b  ) => a - b ;
+
+let negs = x => x < 0 ;
+
+let pos = x => x > 0 ;
+
+let dfsqrd = ( avg ) => x => Math.pow(x-avg,2) ;
+
+let facter = ( facter ) => x => x*facter ;
+
+function PimpMySpreadsheet( sheetName , startRow , redGreenShading , redGreenShadingPercents , factor, minFontSize  ) {   
+  
+  var app = SpreadsheetApp;
+  var FIFOSheet = app.getActiveSpreadsheet().getSheetByName(sheetName);
+  
+  var factor = 1/factor ;
+  var startCol = FIFOSheet.getRange(startRow, 1 , 1, FIFOSheet.getMaxColumns()  ).getValues() ;
+  startCol = startCol[0].indexOf("Account") + startCol[0].indexOf('ACT') + 2;
+
+  var height = FIFOSheet.getRange( startRow , startCol + 4 , FIFOSheet.getMaxRows(), 1 ).getValues()
+  if ( height.map( brackets ).indexOf("Grand Totals:") === -1 ) {
+    height = height.map( brackets ).lastIndexOf("Totals:") 
+  }
+  else {
+    height = height.map( brackets ).indexOf("Grand Totals:") 
+  }
+
+  var range = FIFOSheet.getRange( startRow , startCol , height , 22 +startCol ).getValues() ; 
+  var headAry = range[0] ;
+  var width = headAry.indexOf('');
+   
+  //naming all the columns and getting an index for them
+  var act = startCol  ;
+  var qty = WhichCol( headAry , startCol , 'Qty.' , 'QTY' ) ;
+  var cb = WhichCol( headAry , startCol , 'Cost Basis' , 'CB' ) ;
+  var gl = WhichCol( headAry , startCol , 'Gain or (Loss)' , 'G/(L)' )  ; 
+  var term = WhichCol( headAry , startCol , 'Term' )  ; 
+  var per = WhichCol( headAry , startCol , 'ROI' ) ;
+  var perAnn = WhichCol( headAry , startCol , 'Annual Capital ROI' , 'ANN' ) ;
+  var div = WhichCol( headAry , startCol , 'Dividends Recieved' , 'DIVS' ) ; 
+  var divPer =  WhichCol( headAry , startCol , 'Dividend ROI' , 'DIV ROI' ) ;  
+  var annDivPer = WhichCol( headAry , startCol , 'Annual Dividend ROI' , 'DIV ANN' ) ;  
+  var gLPerDiv = WhichCol( headAry , startCol , 'Total ROI' , 'TOT ROI' ) ; 
+  var gLPerDivAnn = WhichCol( headAry , startCol , 'Total Annual ROI' , 'TOT ANN' ) ; 
+  var fees = WhichCol( headAry , startCol , 'Total Fees' , 'TOT FEES' ) ; 
+  //note: changing long header labels based on if gifts are displayed will have no affect since the change is always made after the original.
+  //ie Term => Term/ Gift
+  
+  var sorted ; //checks if term is not in the header. If so then it is sorted and vice versa. 
+  if ( term < startCol ) {
+    sorted = 1 ;  
+  }
+  else {
+    sorted = 0 ;
+  }
+
+  //these are the columns that will potentially be shaded red/green
+  var numbers = [ gl , div , fees ] ;
+  var percents = [ per , perAnn , divPer , annDivPer , gLPerDiv , gLPerDivAnn ] ;
+
+  //this checks if the previous columns are being displayed. If not then it will remove them from the previous arrays
+  numbers = RemoveHidden( numbers , startCol ) ;
+  percents = RemoveHidden ( percents , startCol ) ;
+  
+  var counter = [] ;
+  var count;
+  var shCounter = 0;
+  var lgCounter = 0;
+  var giftCounter = 0;
+  
+  var acts;
+  acts = FIFOSheet.getRange( startRow , act , height  , 1 ) ;
+  acts = acts.getValues()
+  acts = acts.map(brackets)
+  
+  var shortTerm = acts.indexOf("Short-Term") ;
+  var longTerm = acts.indexOf("Long-Term") ;
+  var gifts = acts.indexOf("Gifts") ;
+  var notSorted = acts.slice( 3 , acts.length )
+  notSorted = notSorted.indexOf("") ; //finds the first blank cell 
+  
+  var wt = '#ffffff' ;
+  
+  var prevHeight = Number( PropertiesService.getScriptProperties().getProperty( 'prevHeight' ) )
+  var prevWidth = Number( PropertiesService.getScriptProperties().getProperty( 'prevWidth' ) )
+  var clearHeight ;
+  var clearWidth ;
+  
+  //if the previous is smaller, we want to clear the current
+  //if the previous is bigger, then we want to clear the previous
+  
+  if ( prevHeight < height ) {
+    clearHeight = height ;
+  }
+  else {
+    clearHeight = prevHeight ;
+  }
+  if ( prevWidth < width ) {
+    clearWidth = width ;
+  }
+  else {
+    clearWidth = prevWidth ;  
+  }
+  
+  //reset cell formats
+  FIFOSheet.setColumnWidths( act, clearWidth , 117 )
+  FIFOSheet.getRange( startRow  , act , clearHeight  , clearWidth ) 
+  .setFontWeight( 'normal' )
+  .setBorder( false,false,false,false,false,false)
+  .setFontFamily( 'Arial' )
+  .setFontSize( minFontSize )
+  .setVerticalAlignment( 'bottom' )
+  .setBackground(wt) 
+  .setHorizontalAlignment('right') 
+  .setFontColor( 'black' ) 
+  .setWrap(false)
+  .setFontLine('none');
+  FIFOSheet.setRowHeights( startRow , clearHeight , minFontSize + 10 ) ; 
+  
+  FIFOSheet.setColumnWidth( act, 120 ) ; // Account
+  
+  FIFOSheet.setColumnWidth( act + 1, 72 ) ; // Qty
+  
+  FIFOSheet.setColumnWidth( act + 2 , 102 ) ; // Description
+  FIFOSheet.getRange( startRow + 1, act + 2, height).setHorizontalAlignment('left') ;
+  
+  FIFOSheet.setColumnWidths( act + 3 , 2 , 105 ) ; //Date Aquired and Date Sold
+  
+  var sti , stf , lti , ltf , gi , gf ;
+  var intervals = [ sti , stf , lti , ltf , gi , gf ] ;
+  
+  //this function draws a border over each category and sets the format of the category label ( ie 'Short-Term' )
+  //it also returns the start and finish row values for each category
+  var ary = Categories( shortTerm , longTerm , gifts , FIFOSheet , startRow , startCol , width , height, minFontSize , acts )
+ 
+  sti = ary[0] ;
+  stf = ary[1] ;
+  lti = ary[2] ;
+  ltf = ary[3] ; //I wanted this to be simpler to assign these variables
+  gi = ary[4] ;
+  gf = ary[5] ;
+  
+  var kinds = [ [sti, stf] , [lti , ltf] , [gi , gf ] ] ; 
+  kinds = kinds.filter ( filterNullNull ) ; //eliminates nulls
+  if ( kinds.length === 0 ) {
+    kinds = [[ startRow + 2 , notSorted + startRow + 2]] ; //I need to put height in and not notSorted, later though
+  }
+  
+  acts = acts.filter( filterMTBracks ) // I thought i already did this?
+  
+  //formats header
+  var headerRow = FIFOSheet.getRange( startRow , act , 1 , width )
+  headerRow.setFontFamily('Cambria')
+  .setFontFamily('Arial')
+  .setFontWeight('bold') 
+  .setFontColor('white')
+  .setBackground('#1c4587')
+  .setFontSize(minFontSize + minFontSize * 0.1)
+  .setWrap(true)
+  .setHorizontalAlignment('center') ; 
+  if ( headAry[0] === 'ACT' ) {
+    FIFOSheet.getRange( startRow  , startCol  , 1  , width).setFontSize(minFontSize) ;
+  }
+  FIFOSheet.autoResizeRows(startRow, 1)
+  //Logger.log( 'kinds' , kinds )
+  var gry = '#efefef' ;
+  //draws alternating colors
+  for ( var i = 0 ; i < kinds.length ; i++ ) {
+    for ( var j = kinds[i][0] ; j < kinds[i][1]+1 ; j++ ) {
+      if (!( ((( kinds[i][0] ) % 2 === 0 ) && ( j % 2 === 0))  || ( ( ( kinds[i][0] ) % 2 === 1 ) && ( ( j % 2 ) === 1 ) ) ) ) { 
+        FIFOSheet.getRange( j , act , 1 , width ).setBackground(gry) ;
+        FIFOSheet.getRange(  j , act ) ;
+        FIFOSheet.getRange( j , act + 1 , 1 , 2 ).setBackgroundRGB( 255 , 234 , 243 ) ;
+        FIFOSheet.getRange( j , act + 3 , 1 , 2 ).setBackgroundRGB( 222 , 232 , 249 ) ;
+      }
+    }
+  }
+  
+  //sets formats for Qty. , dates, proceeds, and cost basis
+  var qtys = FIFOSheet.getRange( startRow + 1 , qty  , height  , 1 ).getValues() ;
+  var thisCell ;
+  //Logger.log('qtys' , qtys) ;
+  for ( var i = 0 ; i < qtys.length ; i ++ ) {
+    Logger.log( qtys[i][0].valueOf() )
+    thisCell = FIFOSheet.getRange( startRow + 1 + i , qty )
+    if ( qtys[i][0]%1 === 0  ) { 
+      thisCell.setNumberFormat("#0")
+    }
+    else {
+      thisCell.setNumberFormat("0.####0")
+    }
+  }
+  FIFOSheet.getRange( startRow + 1 , act + 3 , height  , 2 ).setNumberFormat("MM/dd/yyyy") ; 
+  FIFOSheet.getRange( startRow + 1 , cb -1 , height  , 2 ).setNumberFormat('_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)') ; 
+
+  //sets formats for numbers, percents, and the category totals
+  for ( var i = 0 ; i < kinds.length ; i++ ) {
+    for ( var j = 0 ; j < numbers.length ; j++ ) {
+      FIFOSheet.setColumnWidth( numbers[j] , 102) ;
+      FIFOSheet.getRange( startRow + 1 , numbers[j] , height  , 1 ).setNumberFormat( '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)' )  ;
+      RedGreenShader( kinds[i][0] , kinds[i][1] , numbers[j] , factor , FIFOSheet , redGreenShading ) ;
+    } ;
+    for ( var j = 0 ; j < percents.length ; j++ ) {
+      FIFOSheet.setColumnWidth( percents[ j ] , 99 ) ;
+      FIFOSheet.getRange( startRow + 1 , percents[ j ] , height , 1).setNumberFormat( "#.##%;(#.##)%" ) ;
+      RedGreenShader( kinds[i][0] , kinds[i][1] , percents[j] , factor , FIFOSheet , redGreenShadingPercents ) ;
+    } ;
+    if ( sorted === 1 ) {
+      FIFOSheet.getRange( kinds[i][1] + 1, act ,1 , width).setFontWeight('bold') ; //sets category total row to bold
+      FIFOSheet.getRange( kinds[i][1] + 1, act + 4 ).setFontFamily('Cambria') ; 
+      FIFOSheet.setRowHeight(kinds[i][1] + 1 , 30) ;
+      FIFOSheet.setRowHeight( kinds[i][1] +2, 9) ;
+    } ;
+  }
+  
+  //sets format for grand total
+  FIFOSheet.getRange( startRow + height , act ,1 , width) 
+  .setFontWeight( 'bold ')
+  .setBorder( true, false , false, false , false , false , 'black', SpreadsheetApp.BorderStyle.SOLID_MEDIUM ) 
+  .setVerticalAlignment( 'middle' )
+  .setFontSize( minFontSize  ) 
+  .setWrap(true) ;
+  FIFOSheet.getRange( startRow + height , act + 4 ).setFontFamily( 'Cambria' ) ;
+  
+  if ( term > 0 ) {
+    FIFOSheet.setColumnWidth( term , 75 )
+  }
+  
+  FIFOSheet.setRowHeight(startRow + height, 39)
+  FIFOSheet.setRowHeight(startRow + height - 1, 9)
+  
+  PropertiesService.getScriptProperties().setProperty( 'prevHeight', height )
+  PropertiesService.getScriptProperties().setProperty( 'prevWidth', width )
+}
+
+function WhichCol( headerAry , startCol , longLabel , shortLabel ) { 
+  shortLabel = shortLabel || 0 ;
+  var col ;
+  if ( shortLabel !== 0 ) {
+    col = headerAry.indexOf( longLabel ) + headerAry.indexOf( shortLabel ) + 1 ;  
+  }
+  else {
+    col =  headerAry.indexOf( longLabel ) ; 
+  }
+  col += startCol ;
+  return col ;
+}
+
+function RemoveHidden( ary , startCol ) {
+  for ( var i = 0 ; i < ary.length ; i++ ) {
+    if ( ary[ i ] < startCol ) {
+      ary.splice( i , 1 ) ;
+      i-- ;
+    }
+  }
+  return ary ;
+}
+
+function Categories( shortTerm , longTerm , gifts , FIFOSheet , startRow , startCol , width , height, minFontSize , acts ) {
+  
+  var sti , stf , lti , ltf , gi , gf  ;
+  var acts = acts
+  
+  if ( shortTerm > -1 ) {
+    //Logger.log( 'short Term' , shortTerm , 'acts' , acts)
+    FIFOSheet.getRange( startRow + shortTerm , startCol , 1 , width ).setBorder(true, false, false , false , false , false , 'black', SpreadsheetApp.BorderStyle.SOLID_MEDIUM) ;
+    FIFOSheet.getRange( startRow + shortTerm , startCol , 1 , 1 ).setFontWeight('bold')
+    .setFontSize( minFontSize + minFontSize * 0.1 )
+    .setVerticalAlignment('middle') 
+    .setFontFamily('Cambria') ;
+    
+    FIFOSheet.setRowHeight(shortTerm + startRow, 39) ;
+    //Logger.log( 'shortTerm + startRow' , shortTerm + startRow )
+    //Logger.log( 'acts.slice( shortTerm , acts.length ).indexOf()', acts.slice( shortTerm , acts.length ).indexOf(''))
+    //Logger.log( 'acts.slice( shortTerm , acts.length ).indexOf() + sti - 2' , acts.slice( shortTerm , acts.length ).indexOf('') + sti - 2 )
+    sti = shortTerm + startRow + 1 ;
+    //Logger.log(sti) ;
+    stf = acts.slice( shortTerm , acts.length ).indexOf('') + sti - 2 ;
+    //Logger.log(stf) ;    
+  }
+  else {
+    FIFOSheet.getRange( startRow + 1 , startCol , 1 , width ).setBorder( true , false , false , false , false , false , 'black' , SpreadsheetApp.BorderStyle.SOLID_MEDIUM) 
+    .setVerticalAlignment( 'bottom' ) ;
+    FIFOSheet.setRowHeight( startRow + 1 , 9 ) ;
+    FIFOSheet.setRowHeight( startRow + height -2 , 9 ) ;
+    
+  }
+  if ( longTerm > -1 ) {
+    FIFOSheet.getRange( longTerm + startRow, startCol , 1, width ).setBorder(true, false , false, false , false , false , 'black', SpreadsheetApp.BorderStyle.SOLID_MEDIUM) ;
+    FIFOSheet.getRange( longTerm + startRow, startCol , 1, 1 ).setFontWeight('bold')
+    .setFontSize( minFontSize + minFontSize * 0.1 )
+    .setVerticalAlignment( 'middle' ) 
+    .setFontFamily( 'Cambria' );
+    FIFOSheet.setRowHeight( longTerm + startRow, 39 );
+    lti = longTerm + startRow + 1 ;
+    ltf = acts.slice( longTerm , acts.length ).indexOf('') + lti -2 ;
+  }
+  if ( gifts > -1 ) {
+    FIFOSheet.getRange( gifts + startRow, startCol , 1 , width ).setBorder(true, false , false, false , false , false , 'black', SpreadsheetApp.BorderStyle.SOLID_MEDIUM) ;  
+    FIFOSheet.getRange( gifts + startRow, startCol , 1 , 1 ).setFontWeight('bold')
+    .setFontSize(minFontSize + minFontSize * 0.1)
+    .setVerticalAlignment('middle') 
+    .setFontFamily('Cambria');
+    FIFOSheet.setRowHeight(gifts + startRow, 39);
+    gi = gifts + startRow + 1 ;
+    gf = acts.slice( gifts , acts.length ).indexOf('') + gi -2  ;
+  }
+  var arrry = [ sti , stf , lti , ltf, gi , gf ] ;
+  return arrry ;
+}
+
+function RedGreenShader( start , end , col , factor , FIFOSheet , shadingOnOff) {
+  
+  var start = start ;
+  var end = end ;
+  var col = col ;
+  var factor = factor ;
+  
+  if ( shadingOnOff === 0 ) {
+   return 0 ; 
+  } ;
+
+  var count = end - start + 1
+  var range = FIFOSheet.getRange( start , col  , count , 1 ).getValues() ;
+  //Logger.log('range' , range)
+  range = range.map( brackets ) ;
+  //Logger.log('range' , range)
+
+  var sumNegs ;
+  var avgNegs ;
+  var sdNegs ;
+  
+  var arryNegs = range.filter( negs ) ;
+  if ( arryNegs.length ) {
+    sumNegs = arryNegs.reduce(reducer) ;
+    avgNegs = sumNegs / arryNegs.length ;
+    sdNegs = Math.abs(Math.sqrt( arryNegs.map( dfsqrd( avgNegs ) ).reduce(reducer) / arryNegs.length )); 
+  }
+  else {
+   avgNegs = 0 ;
+   sdNegs = 0 ;
+  }
+  var sumPos;
+  var avgPos ;
+  var sdPos ;
+  
+  var arryPos = range.filter( pos ) ;
+ // Logger.log('arryPos' , arryPos)
+  if ( arryPos.length ) {
+    //Logger.log( 'arryPos' , arryPos )
+    sumPos = arryPos.reduce(reducer) ;
+    avgPos = sumPos / arryPos.length ;
+    sdPos = Math.sqrt( arryPos.map( dfsqrd( avgPos ) ).reduce(reducer)/ arryPos.length ); 
+  }
+  else {
+    avgPos = 0 ;
+    sdPos = 0 ;
+  }
+  //Logger.log('sdNegs , avgNegs , sdPos, avgPos, factor' , sdNegs , avgNegs , sdPos, avgPos, factor)
+  var stepColor = Steps( sdNegs , avgNegs , sdPos, avgPos, factor ) ; // returns [ [ steps ] , [ colors ] ]
+  var steps = stepColor[0] ;
+  var colors = stepColor[1] ;
+
+  var wt = '#ffffff' ;
+  
+  for ( var i = 0 ; i < range.length ; i++ ) {
+    for ( var j = 0 ; j < steps.length - 1 ; j++ ) {
+      //Logger.log( 'j ' , j)
+      if ( steps[j] <= range[i] && range[i] < steps[j+1] ) {
+        if ( colors[j] !== wt ) { //&& colors[j] !== '#fcfefc' && colors[j] !==  '#fefefe'
+          FIFOSheet.getRange( start + i , col ).setBackground(colors[j])
+            break;
+          //if ( steps[j+1] === 0.0001426969 ) {
+          //  break
+        //  }
+        } 
+        else {
+         break; 
+        }
+        //Logger.log( '01j , steps.indexOf( 0.0001426969 )' , j , steps.indexOf( 0.0001426969 ))
+
+        //break;
+      }
+    }
+  }
+}
+
+function Steps( sd , avg , sd2, avg2 , factor ) {
+  
+  var dg0 = '#365729' ; //25
+  var dg1 = '#416831' ; //30
+  var dg2 = '#578b41' ; //40
+  var dg3 = '#6aa84f' ; //48
+  var dg4 = '#7cb663' ; //55
+  var lg1 = '#93c47d' ; //63
+  var lg2 = '#a7ce97' ; //70
+  var lg3 = '#b6d7a8' ; //75
+  var lg4 = '#c4dfb9' ; //80
+  var lg5 = '#d9ead3' ; //87
+  var lg6 = '#e1eedd' ; //90
+  var lg7 = '#f0f7ee' ; //95
+  var lg8 = '#f5fbf4' ; //97
+  var lg9 = '#fcfefc' ; //99
+  var lg10 = '#fefefe' ; //99.5
+  var wt = '#ffffff' ;
+  var lr6 = '#fbeaea' ;
+  var lr5 = '#f4cccc' ;
+  var lr4 = '#f2c0c0' ;
+  var lr3 = '#eeaaaa' ;
+  var lr2 = '#ea9999' ;
+  var lr1 ='#e06666' ;
+  var dr = '#cc0000' ;
+  
+  if ( sd2 === 0 ) {
+   lg9 = lg7 
+  }
+  
+  avg2 += 0.000000000001 ;
+  
+  var colors = [ dr , lr1, lr2 , lr3, lr4, lr5 , lr6, 
+                lg9 , wt, lg9,
+                lg7 , lg6 , lg5, lg4, lg3 , 
+                lg2 , lg1, 
+                dg4, dg3, dg2, dg1,  dg0 ] ;
+  
+  var steps = [ -Infinity,  -5*sd +avg , -3*sd +avg, -1*sd +avg, avg ,  1*sd +avg,  2*sd +avg   ,
+              -0.00001 , 0 , 0.0001426969 , 
+               -3*sd2 +avg2   , -2.1*sd2 +avg2 , -1.2*sd2 +avg2   , -0.6*sd2 +avg2 , -0.3*sd2 +avg2 , avg2 ,  
+              0.3*sd2  +avg2   , 0.6*sd2  +avg2   , 
+              0.9*sd2  +avg2  , 1.5*sd2   +avg2  , 2.1*sd2 +avg2  ,  3.3*sd2 +avg2 ,  Infinity ] ;
+    
+  var counter = 0 ;
+  var counter2 = 0 ;
+  
+ //Logger.log(arry)
+  
+  if ( avg = 0 ) {
+    steps = steps.slice( 7 , steps.length)
+    colors = colors.slice( 7 , steps.length)
+  }
+  
+  if ( avg2 = 0 ) {
+    steps = steps.slice( 0 , 9 ) 
+    colors = colors.slice( 0 , 9 )
+  }
+  
+  for ( var i = 5; i < 7 ; i++ ) {
+    if ( steps[i] > 0 ) {
+      //counter++ :
+      steps.splice( i , 1 ) ;
+      colors.shift() ;
+      i--
+    }
+  }
+  for ( var i = steps.indexOf(0.0001426969) ; i < steps.indexOf(0.0001426969) + 5 ; i++ ) {
+    if ( steps[i] < 0 ) {
+      //counter2++
+      steps.splice( i , 1 )
+      colors.pop()
+      i--
+    }
+  }
+
+  steps.splice( -18 , -counter ) ;
+  for ( var i = 0 ; i < counter ; i++ ) {
+    colors.shift()
+  }
+  
+  //Logger.log(factor)
+  //Logger.log('before' , steps ) ;
+  steps = steps.map( facter(factor) )
+  //Logger.log( 'after' , steps )
+
+  
+//  for ( var i = 0 ; i < steps.length ; i++ ) {
+//    for ( var j = i + 1 ; j < steps.length ; j++ ) {
+//      if ( steps[i] === steps[j] ) {
+//        steps.splice( i , 1 ) ;
+//        colors.splice( i , 1 ) ;
+//        i-- ;
+//      }
+//    }
+//  }
+  
+  var comb = [ steps, colors ]
+  //Logger.log( comb ) ;
+  return comb
+
+}
