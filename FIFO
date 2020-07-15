@@ -1,15 +1,14 @@
-//this function's purpose is to format the output of function FIFO. Will execute on open, refresh or run
+ //this function's purpose is to format the output of function FIFO. Will execute on open, refresh or run
 function onOpen(e) { 
 
-  var sheetName = 'FIFO3' ; 
-  var startRow =  1 ; 
+  var sheetName = 'SheetName' ; 
+  var startRow =  0 ; 
     
   // 0 or 1 
   var redGreenShading = 1 ;
   var redGreenShadingPercents = 1 ;
   
-  var factor = 1 ;
-  
+  var factor = 1 ; //not ready to change
   var minFontSize = 11 ; //not ready to change from 11
   
   PimpMySpreadsheet( sheetName , startRow , redGreenShading , redGreenShadingPercents , factor,  minFontSize ) ; 
@@ -1824,11 +1823,12 @@ function PimpMySpreadsheet( sheetName , startRow , redGreenShading , redGreenSha
   //if the previous is bigger, then we want to clear the previous
   
   if ( prevHeight < height ) {
-    clearHeight = height ;
+    clearHeight = height + 2 ; //+2 for grand totals? need to test
   }
   else {
-    clearHeight = prevHeight ;
+    clearHeight = prevHeight + 2 ;
   }
+  
   if ( prevWidth < width ) {
     clearWidth = width ;
   }
@@ -1915,7 +1915,7 @@ function PimpMySpreadsheet( sheetName , startRow , redGreenShading , redGreenSha
   var thisCell ;
   //Logger.log('qtys' , qtys) ;
   for ( var i = 0 ; i < qtys.length ; i ++ ) {
-    Logger.log( qtys[i][0].valueOf() )
+    //Logger.log( qtys[i][0].valueOf() )
     thisCell = FIFOSheet.getRange( startRow + 1 + i , qty )
     if ( qtys[i][0]%1 === 0  ) { 
       thisCell.setNumberFormat("#0")
